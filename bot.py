@@ -33,7 +33,7 @@ class HDHub4uScraper:
         
     def search_movies(self, query):
         try:
-            # FIXED: Correct search URL format
+            # Correct search URL format
             search_url = f"{BASE_URL}/search.html?q={quote(query)}"
             logger.info(f"Searching URL: {search_url}")
             
@@ -44,35 +44,75 @@ class HDHub4uScraper:
             
             movies = []
             
-            # Find all movie entries - from the HTML structure
-            # Looking for movie links in the results
-            movie_links = soup.find_all('a', href=True)
+            # Method 1: Look for links with movie titles
+            # From the HTML you showed, movies are in <a> tags
+            all_links = soup.find_all('a', href=True)
             
-            for link in movie_links:
+            for link in all_links:
                 href = link.get('href', '')
                 title = link.text.strip()
                 
-                # Filter for movie links (usually contain /movie/ or /watch/ or are not home/trending)
-                if title and len(title) > 5 and not title.lower() in ['home', 'trending', 'search', 'login', 'register']:
-                    # Skip if it's a category link or empty
-                    if any(skip in title.lower() for skip in ['view all', 'trending', 'top', 'menu']):
+                # Skip if empty or too short
+                if not title or len(title) < 10:
+                    continue
+                
+                # Check if it's a movie title (contains quality indicators or year)
+                if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202']):
+                    
+                    # Extract qualities
+                    qualities = []
+                    if '4K' in title: qualities.append('4K')
+                    if '1080p' in title: qualities.append('1080p')
+                    if '720p' in title: qualities.append('720p')
+                    if '480p' in title: qualities.append('480p')
+                    
+                    # Extract year
+                    year_match = re.search(r'(19|20)\d{2}', title)
+                    year = year_match.group() if year_match else 'N/A'
+                    
+                    # Build full URL
+                    if href.startswith('/'):
+                        full_url = urljoin(BASE_URL, href)
+                    elif href.startswith('http'):
+                        full_url = href
+                    else:
+                        full_url = urljoin(BASE_URL, '/' + href)
+                    
+                    movies.append({
+                        'title': title[:100],
+                        'year': year,
+                        'url': full_url,
+                        'qualities': qualities if qualities else ['HD']
+                    })
+                    
+                    logger.info(f"Found movie: {title[:60]}")
+            
+            # Method 2: If no movies found, try looking for movie containers
+            if not movies:
+                logger.info("Method 1 found 0 movies, trying Method 2...")
+                
+                # Look for divs that might contain movie info
+                containers = soup.find_all('div', class_=re.compile(r'movie|item|post|entry'))
+                
+                for container in containers:
+                    # Find the link inside
+                    link = container.find('a', href=True)
+                    if not link:
                         continue
                     
-                    # Check if it's a movie title (usually contains year or quality indicators)
-                    if any(key in title for key in ['4K', '1080p', '720p', '480p', '202', 'BluRay', 'WEB-DL', 'HDTC']):
-                        
-                        # Extract qualities
+                    title = link.text.strip()
+                    href = link.get('href', '')
+                    
+                    if title and len(title) > 10:
                         qualities = []
                         if '4K' in title: qualities.append('4K')
                         if '1080p' in title: qualities.append('1080p')
                         if '720p' in title: qualities.append('720p')
                         if '480p' in title: qualities.append('480p')
                         
-                        # Extract year
                         year_match = re.search(r'(19|20)\d{2}', title)
                         year = year_match.group() if year_match else 'N/A'
                         
-                        # Build full URL
                         if href.startswith('/'):
                             full_url = urljoin(BASE_URL, href)
                         else:
@@ -85,7 +125,7 @@ class HDHub4uScraper:
                             'qualities': qualities if qualities else ['HD']
                         })
                         
-                        logger.info(f"Found movie: {title[:50]}")
+                        logger.info(f"Found movie (method 2): {title[:60]}")
             
             # Remove duplicates based on URL
             seen = set()
@@ -96,6 +136,11 @@ class HDHub4uScraper:
                     unique_movies.append(movie)
             
             logger.info(f"Total movies found: {len(unique_movies)}")
+            
+            # Log first few movies for debugging
+            for i, movie in enumerate(unique_movies[:3]):
+                logger.info(f"Movie {i+1}: {movie['title']} - {movie['url']}")
+            
             return unique_movies[:15]
             
         except Exception as e:
@@ -168,6 +213,7 @@ def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
         data['reply_markup'] = reply_markup
     try:
         response = requests.post(url, json=data)
+        logger.info(f"Message sent to {chat_id}")
         return response.json()
     except Exception as e:
         logger.error(f"Send message error: {e}")
@@ -202,8 +248,6 @@ def webhook():
         
         if not update:
             return jsonify({"status": "ok"}), 200
-        
-        logger.info(f"Received update")
         
         # Handle callback queries (button clicks)
         if 'callback_query' in update:
