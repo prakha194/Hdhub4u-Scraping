@@ -33,72 +33,70 @@ class HDHub4uScraper:
         
     def search_movies(self, query):
         try:
-            search_url = f"{BASE_URL}/?s={quote(query)}"
+            # FIXED: Correct search URL format
+            search_url = f"{BASE_URL}/search.html?q={quote(query)}"
             logger.info(f"Searching URL: {search_url}")
             
             response = self.scraper.get(search_url, timeout=20)
             logger.info(f"Response status: {response.status_code}")
             
-            # Save HTML for debugging (optional - remove in production)
-            with open('debug.html', 'w', encoding='utf-8') as f:
-                f.write(response.text)
-            logger.info("Saved HTML to debug.html")
-            
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Try different selectors to find movies
             movies = []
             
-            # Method 1: Look for article tags
-            containers = soup.find_all('article')
-            logger.info(f"Found {len(containers)} article tags")
+            # Find all movie entries - from the HTML structure
+            # Looking for movie links in the results
+            movie_links = soup.find_all('a', href=True)
             
-            # Method 2: Look for divs with movie-related classes
-            if not containers:
-                containers = soup.find_all('div', class_=re.compile(r'movie|item|post|entry'))
-                logger.info(f"Found {len(containers)} divs with movie classes")
-            
-            # Method 3: Look for li items
-            if not containers:
-                containers = soup.find_all('li', class_=re.compile(r'movie|item'))
-                logger.info(f"Found {len(containers)} li items")
-            
-            for container in containers[:15]:
-                # Try different ways to find title
-                title_elem = None
-                for tag in ['h3', 'h2', 'h1', 'a']:
-                    title_elem = container.find(tag, class_=re.compile(r'title|name|entry-title')) or container.find(tag)
-                    if title_elem:
-                        break
+            for link in movie_links:
+                href = link.get('href', '')
+                title = link.text.strip()
                 
-                # Try different ways to find link
-                link_elem = container.find('a', href=True)
-                
-                if title_elem and link_elem:
-                    title = title_elem.text.strip()
-                    link = link_elem.get('href')
+                # Filter for movie links (usually contain /movie/ or /watch/ or are not home/trending)
+                if title and len(title) > 5 and not title.lower() in ['home', 'trending', 'search', 'login', 'register']:
+                    # Skip if it's a category link or empty
+                    if any(skip in title.lower() for skip in ['view all', 'trending', 'top', 'menu']):
+                        continue
                     
-                    logger.info(f"Found movie: {title} - {link}")
-                    
-                    if link and not link.startswith('#'):
+                    # Check if it's a movie title (usually contains year or quality indicators)
+                    if any(key in title for key in ['4K', '1080p', '720p', '480p', '202', 'BluRay', 'WEB-DL', 'HDTC']):
+                        
+                        # Extract qualities
                         qualities = []
                         if '4K' in title: qualities.append('4K')
                         if '1080p' in title: qualities.append('1080p')
                         if '720p' in title: qualities.append('720p')
                         if '480p' in title: qualities.append('480p')
                         
+                        # Extract year
                         year_match = re.search(r'(19|20)\d{2}', title)
                         year = year_match.group() if year_match else 'N/A'
                         
+                        # Build full URL
+                        if href.startswith('/'):
+                            full_url = urljoin(BASE_URL, href)
+                        else:
+                            full_url = href
+                        
                         movies.append({
-                            'title': title[:80],
+                            'title': title[:100],
                             'year': year,
-                            'url': link if link.startswith('http') else urljoin(BASE_URL, link),
-                            'qualities': qualities if qualities else ['Various']
+                            'url': full_url,
+                            'qualities': qualities if qualities else ['HD']
                         })
+                        
+                        logger.info(f"Found movie: {title[:50]}")
             
-            logger.info(f"Total movies found: {len(movies)}")
-            return movies
+            # Remove duplicates based on URL
+            seen = set()
+            unique_movies = []
+            for movie in movies:
+                if movie['url'] not in seen:
+                    seen.add(movie['url'])
+                    unique_movies.append(movie)
+            
+            logger.info(f"Total movies found: {len(unique_movies)}")
+            return unique_movies[:15]
             
         except Exception as e:
             logger.error(f"Search error: {e}")
@@ -141,7 +139,7 @@ class HDHub4uScraper:
                     
                     if href not in [l['url'] for l in links]:
                         links.append({'quality': quality, 'server': server, 'url': href})
-                        logger.info(f"Found link: {quality} - {server} - {href[:100]}")
+                        logger.info(f"Found link: {quality} - {server}")
             
             # Sort by quality
             quality_order = {'4K': 0, '1080p': 1, '720p': 2, '480p': 3, 'Unknown': 4}
@@ -170,7 +168,6 @@ def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
         data['reply_markup'] = reply_markup
     try:
         response = requests.post(url, json=data)
-        logger.info(f"Send message response: {response.status_code}")
         return response.json()
     except Exception as e:
         logger.error(f"Send message error: {e}")
@@ -206,7 +203,7 @@ def webhook():
         if not update:
             return jsonify({"status": "ok"}), 200
         
-        logger.info(f"Received update: {update.get('message', {}).get('text', 'No text')}")
+        logger.info(f"Received update")
         
         # Handle callback queries (button clicks)
         if 'callback_query' in update:
@@ -238,7 +235,7 @@ def webhook():
                 keyboard = {
                     'inline_keyboard': [
                         [{'text': f"📥 {link['quality']} - {link['server']}", 'callback_data': f"link_{i}"}]
-                        for i, link in enumerate(links[:10])  # Limit to 10
+                        for i, link in enumerate(links[:10])
                     ]
                 }
                 
@@ -272,14 +269,14 @@ def webhook():
                 movies = scraper.search_movies(text)
                 
                 if not movies:
-                    send_message(chat_id, f"❌ No movies found for *{text}*\n\nTry:\n• Different spelling\n• Include year (e.g., The Batman 2022)\n• Shorter title")
+                    send_message(chat_id, f"❌ No movies found for *{text}*\n\nTry:\n• Different spelling\n• Include year (e.g., Animal 2023)\n• Shorter title")
                     return jsonify({"status": "ok"}), 200
                 
                 user_sessions[chat_id] = {'movies': movies}
                 
                 keyboard = {
                     'inline_keyboard': [
-                        [{'text': f"{movie['title'][:40]} ({movie['year']}) [{', '.join(movie['qualities'])}]", 'callback_data': f"movie_{idx}"}]
+                        [{'text': f"{movie['title'][:50]} ({movie['year']}) [{', '.join(movie['qualities'])}]", 'callback_data': f"movie_{idx}"}]
                         for idx, movie in enumerate(movies[:10])
                     ]
                 }
@@ -295,16 +292,6 @@ def webhook():
 @app.route('/')
 def index():
     return "Bot is running!", 200
-
-@app.route('/debug')
-def debug():
-    """Debug endpoint to see what's happening"""
-    return f"""
-    Bot Status: Running
-    Base URL: {BASE_URL}
-    Bot Token Set: {bool(BOT_TOKEN)}
-    Render Hostname: {os.getenv('RENDER_EXTERNAL_HOSTNAME', 'Not set')}
-    """, 200
 
 def setup_webhook():
     """Set webhook on startup"""
