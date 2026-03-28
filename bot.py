@@ -30,7 +30,8 @@ class HDHub4uScraper:
         try:
             search_url = f"{self.base_url}/?s={quote(query)}"
             response = self.scraper.get(search_url, timeout=20)
-            soup = BeautifulSoup(response.text, 'lxml')
+            # FIXED: Changed from 'lxml' to 'html.parser'
+            soup = BeautifulSoup(response.text, 'html.parser')
             
             movies = []
             containers = soup.find_all('article') or soup.find_all('div', class_=re.compile(r'item|post'))
@@ -68,7 +69,8 @@ class HDHub4uScraper:
     def get_download_links(self, movie_url):
         try:
             response = self.scraper.get(movie_url, timeout=20)
-            soup = BeautifulSoup(response.text, 'lxml')
+            # FIXED: Changed from 'lxml' to 'html.parser'
+            soup = BeautifulSoup(response.text, 'html.parser')
             
             links = []
             all_links = soup.find_all('a', href=True)
