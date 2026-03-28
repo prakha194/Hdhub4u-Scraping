@@ -30,7 +30,6 @@ class HDHub4uScraper:
         try:
             search_url = f"{self.base_url}/?s={quote(query)}"
             response = self.scraper.get(search_url, timeout=20)
-            # FIXED: Changed from 'lxml' to 'html.parser'
             soup = BeautifulSoup(response.text, 'html.parser')
             
             movies = []
@@ -69,7 +68,6 @@ class HDHub4uScraper:
     def get_download_links(self, movie_url):
         try:
             response = self.scraper.get(movie_url, timeout=20)
-            # FIXED: Changed from 'lxml' to 'html.parser'
             soup = BeautifulSoup(response.text, 'html.parser')
             
             links = []
@@ -205,18 +203,27 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⚠️ Error occurred. Try again.")
 
 def main():
-    """Start bot"""
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_error_handler(error_handler)
-    
-    logger.info("🤖 Bot is starting...")
-    print("🤖 Bot is running...")
-    app.run_polling()
+    """Start bot with proper error handling"""
+    try:
+        # Create application
+        app = Application.builder().token(BOT_TOKEN).build()
+        
+        # Add handlers
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("help", help_command))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
+        app.add_handler(CallbackQueryHandler(button_callback))
+        app.add_error_handler(error_handler)
+        
+        logger.info("🤖 Bot is starting...")
+        print("🤖 Bot is running...")
+        
+        # Start bot with polling
+        app.run_polling()
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        print(f"Error: {e}")
 
 if __name__ == '__main__':
     main()
