@@ -203,12 +203,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⚠️ Error occurred. Try again.")
 
 def main():
-    """Start bot with proper event loop handling"""
+    """Start bot"""
     try:
-        # Create the Application
         application = Application.builder().token(BOT_TOKEN).build()
         
-        # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
@@ -218,7 +216,6 @@ def main():
         logger.info("🤖 Bot is starting...")
         print("🤖 Bot is running...")
         
-        # Start the bot with polling - handles event loop internally
         application.run_polling()
         
     except Exception as e:
@@ -226,13 +223,4 @@ def main():
         print(f"Error: {e}")
 
 if __name__ == '__main__':
-    # Fix for Python 3.10+ event loop issues
-    try:
-        # Try to get the current event loop
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop, create one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
     main()
