@@ -2,10 +2,11 @@ import os
 import re
 import logging
 from urllib.parse import urljoin, quote
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import cloudscraper
 from bs4 import BeautifulSoup
 import asyncio
+import threading
 
 # Simple logging
 logging.basicConfig(
@@ -25,13 +26,13 @@ if not BOT_TOKEN:
     logger.error("BOT_TOKEN environment variable not set!")
     exit(1)
 
-# Import telegram after token check
+# Import telegram
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
-# Flask app for webhook
-app_flask = Flask(__name__)
+# Flask app
+app = Flask(__name__)
 
 class HDHub4uScraper:
     def __init__(self):
@@ -111,13 +112,7 @@ class HDHub4uScraper:
 scraper = HDHub4uScraper()
 user_sessions = {}
 
-async def delete_message_after(context, chat_id, message_id, delay=DELETE_DELAY):
-    await asyncio.sleep(delay)
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except:
-        pass
-
+# Bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎬 **HDHub4u Movie Bot**\n\nSend me a **movie name** to search\nUse /help for commands\n\n⚠️ Links auto-delete in 20 seconds",
@@ -135,11 +130,11 @@ async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     query = update.message.text.strip()
+    
+    # Send typing action
     await update.message.chat.send_action(action="typing")
     
-    msg = await update.message.reply_text(f"🔍 Searching for *{query}*...", parse_mode=ParseMode.MARKDOWN)
-    await delete_message_after(context, msg.chat_id, msg.message_id, 5)
-    
+    # Search
     movies = scraper.search_movies(query)
     
     if not movies:
@@ -196,13 +191,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         movie = user_sessions.get(user_id, {}).get('movie', {})
         link = user_sessions.get(user_id, {}).get('links', [])[idx]
         
-        msg = await query.message.reply_text(
-            f"🎬 *{movie.get('title', 'Movie')}*\n📀 *{link['quality']}* - {link['server']}\n\n🔗 `{link['url']}`\n\n⚠️ Link auto-deletes in {DELETE_DELAY} seconds",
+        await query.message.reply_text(
+            f"🎬 *{movie.get('title', 'Movie')}*\n📀 *{link['quality']}* - {link['server']}\n\n🔗 `{link['url']}`\n\n⚠️ Link auto-deletes in 20 seconds",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True
         )
         
-        await delete_message_after(context, msg.chat_id, msg.message_id, DELETE_DELAY)
         await query.delete_message()
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -210,40 +204,69 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update and update.effective_message:
         await update.effective_message.reply_text("⚠️ Error occurred. Try again.")
 
-# Initialize application
+# Create application
 application = Application.builder().token(BOT_TOKEN).build()
-
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("help", help_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
 application.add_handler(CallbackQueryHandler(button_callback))
 application.add_error_handler(error_handler)
 
-# Flask route for webhook
-@app_flask.route('/webhook', methods=['POST'])
-async def webhook():
-    """Handle incoming updates"""
+# Flask routes
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Handle incoming webhook updates"""
     try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        await application.process_update(update)
-        return 'OK', 200
+        # Get update data
+        update_data = request.get_json(force=True)
+        
+        # Process update in a thread with its own event loop
+        def process():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            update = Update.de_json(update_data, application.bot)
+            loop.run_until_complete(application.process_update(update))
+            loop.close()
+        
+        thread = threading.Thread(target=process)
+        thread.start()
+        
+        return jsonify({"status": "ok"}), 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        return 'Error', 500
+        return jsonify({"error": str(e)}), 500
 
-@app_flask.route('/')
+@app.route('/')
 def index():
     return "Bot is running!", 200
 
 def setup_webhook():
-    """Set up the webhook"""
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook"
+    """Set webhook on startup"""
     try:
-        # Create new event loop for webhook setup
+        # Get Render hostname
+        hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+        if not hostname:
+            logger.error("RENDER_EXTERNAL_HOSTNAME not set!")
+            return
+        
+        webhook_url = f"https://{hostname}/webhook"
+        
+        # Set webhook using a new event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(application.bot.set_webhook(webhook_url))
-        logger.info(f"Webhook set to {webhook_url}")
+        loop.close()
+        
+        logger.info(f"✅ Webhook set to: {webhook_url}")
+        
+        # Get webhook info to verify
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        info = loop.run_until_complete(application.bot.get_webhook_info())
+        loop.close()
+        
+        logger.info(f"Webhook info: {info}")
+        
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
 
@@ -252,6 +275,6 @@ if __name__ == '__main__':
     setup_webhook()
     
     # Start Flask server
-    logger.info("🤖 Bot is running with webhook mode...")
-    print("🤖 Bot is running...")
-    app_flask.run(host='0.0.0.0', port=PORT)
+    logger.info(f"🤖 Bot starting on port {PORT}...")
+    print(f"🤖 Bot running on port {PORT}")
+    app.run(host='0.0.0.0', port=PORT)
