@@ -3,6 +3,7 @@ import re
 import logging
 from urllib.parse import urljoin, quote
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import cloudscraper
 from bs4 import BeautifulSoup
 import requests
@@ -21,8 +22,9 @@ if not BOT_TOKEN:
     logger.error("BOT_TOKEN environment variable not set!")
     exit(1)
 
-# Flask app
+# Flask app with CORS
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # Telegram API URL
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -33,7 +35,6 @@ class HDHub4uScraper:
         
     def search_movies(self, query):
         try:
-            # Correct search URL format
             search_url = f"{BASE_URL}/search.html?q={quote(query)}"
             logger.info(f"Searching URL: {search_url}")
             
@@ -44,79 +45,35 @@ class HDHub4uScraper:
             
             movies = []
             
-            # Method 1: Look for links with movie titles
-            # From the HTML you showed, movies are in <a> tags
+            # Find all links with movie titles
             all_links = soup.find_all('a', href=True)
             
             for link in all_links:
                 href = link.get('href', '')
                 title = link.text.strip()
                 
-                # Skip if empty or too short
-                if not title or len(title) < 10:
-                    continue
-                
-                # Check if it's a movie title (contains quality indicators or year)
-                if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202']):
-                    
-                    # Extract qualities
-                    qualities = []
-                    if '4K' in title: qualities.append('4K')
-                    if '1080p' in title: qualities.append('1080p')
-                    if '720p' in title: qualities.append('720p')
-                    if '480p' in title: qualities.append('480p')
-                    
-                    # Extract year
-                    year_match = re.search(r'(19|20)\d{2}', title)
-                    year = year_match.group() if year_match else 'N/A'
-                    
-                    # Build full URL
-                    if href.startswith('/'):
-                        full_url = urljoin(BASE_URL, href)
-                    elif href.startswith('http'):
-                        full_url = href
-                    else:
-                        full_url = urljoin(BASE_URL, '/' + href)
-                    
-                    movies.append({
-                        'title': title[:100],
-                        'year': year,
-                        'url': full_url,
-                        'qualities': qualities if qualities else ['HD']
-                    })
-                    
-                    logger.info(f"Found movie: {title[:60]}")
-            
-            # Method 2: If no movies found, try looking for movie containers
-            if not movies:
-                logger.info("Method 1 found 0 movies, trying Method 2...")
-                
-                # Look for divs that might contain movie info
-                containers = soup.find_all('div', class_=re.compile(r'movie|item|post|entry'))
-                
-                for container in containers:
-                    # Find the link inside
-                    link = container.find('a', href=True)
-                    if not link:
-                        continue
-                    
-                    title = link.text.strip()
-                    href = link.get('href', '')
-                    
-                    if title and len(title) > 10:
+                # Check if it's a movie (contains quality or year indicators)
+                if title and len(title) > 10:
+                    if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202']):
+                        
+                        # Extract qualities
                         qualities = []
                         if '4K' in title: qualities.append('4K')
                         if '1080p' in title: qualities.append('1080p')
                         if '720p' in title: qualities.append('720p')
                         if '480p' in title: qualities.append('480p')
                         
+                        # Extract year
                         year_match = re.search(r'(19|20)\d{2}', title)
                         year = year_match.group() if year_match else 'N/A'
                         
+                        # Build full URL
                         if href.startswith('/'):
                             full_url = urljoin(BASE_URL, href)
-                        else:
+                        elif href.startswith('http'):
                             full_url = href
+                        else:
+                            full_url = urljoin(BASE_URL, '/' + href)
                         
                         movies.append({
                             'title': title[:100],
@@ -124,10 +81,8 @@ class HDHub4uScraper:
                             'url': full_url,
                             'qualities': qualities if qualities else ['HD']
                         })
-                        
-                        logger.info(f"Found movie (method 2): {title[:60]}")
             
-            # Remove duplicates based on URL
+            # Remove duplicates
             seen = set()
             unique_movies = []
             for movie in movies:
@@ -135,12 +90,7 @@ class HDHub4uScraper:
                     seen.add(movie['url'])
                     unique_movies.append(movie)
             
-            logger.info(f"Total movies found: {len(unique_movies)}")
-            
-            # Log first few movies for debugging
-            for i, movie in enumerate(unique_movies[:3]):
-                logger.info(f"Movie {i+1}: {movie['title']} - {movie['url']}")
-            
+            logger.info(f"Found {len(unique_movies)} movies")
             return unique_movies[:15]
             
         except Exception as e:
@@ -162,8 +112,8 @@ class HDHub4uScraper:
                 href = link.get('href', '')
                 text = link.text.strip().lower()
                 
-                # Check if it's a download link
-                if any(k in href.lower() for k in ['download', 'get', 'file', '.mp4', '.mkv', 'hubcloud', 'drive.google', 'mega']):
+                # Check for download links
+                if any(k in href.lower() for k in ['download', '.mp4', '.mkv', 'hubcloud']):
                     quality = 'Unknown'
                     if '4k' in href.lower() or '4k' in text:
                         quality = '4K'
@@ -174,23 +124,16 @@ class HDHub4uScraper:
                     elif '480p' in href.lower() or '480p' in text:
                         quality = '480p'
                     
-                    server = 'Direct'
-                    if 'hubcloud' in href.lower():
-                        server = 'HubCloud'
-                    elif 'drive.google' in href.lower():
-                        server = 'GDrive'
-                    elif 'mega' in href.lower():
-                        server = 'Mega'
+                    server = 'HubCloud' if 'hubcloud' in href.lower() else 'Direct'
                     
                     if href not in [l['url'] for l in links]:
                         links.append({'quality': quality, 'server': server, 'url': href})
-                        logger.info(f"Found link: {quality} - {server}")
             
             # Sort by quality
-            quality_order = {'4K': 0, '1080p': 1, '720p': 2, '480p': 3, 'Unknown': 4}
+            quality_order = {'4K': 0, '1080p': 1, '720p': 2, '480p': 3}
             links.sort(key=lambda x: quality_order.get(x['quality'], 99))
             
-            logger.info(f"Total links found: {len(links)}")
+            logger.info(f"Found {len(links)} download links")
             return links
             
         except Exception as e:
@@ -200,24 +143,22 @@ class HDHub4uScraper:
 scraper = HDHub4uScraper()
 user_sessions = {}
 
-# Helper function to send messages
-def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
+# Helper functions for Telegram
+def send_message(chat_id, text, reply_markup=None):
     url = f"{TELEGRAM_API}/sendMessage"
     data = {
         'chat_id': chat_id,
         'text': text,
-        'parse_mode': parse_mode,
+        'parse_mode': 'Markdown',
         'disable_web_page_preview': True
     }
     if reply_markup:
         data['reply_markup'] = reply_markup
     try:
-        response = requests.post(url, json=data)
-        logger.info(f"Message sent to {chat_id}")
-        return response.json()
+        requests.post(url, json=data, timeout=10)
+        logger.info(f"Sent message to {chat_id}")
     except Exception as e:
-        logger.error(f"Send message error: {e}")
-        return None
+        logger.error(f"Send error: {e}")
 
 def edit_message(chat_id, message_id, text, reply_markup=None):
     url = f"{TELEGRAM_API}/editMessageText"
@@ -240,9 +181,14 @@ def delete_message(chat_id, message_id):
     url = f"{TELEGRAM_API}/deleteMessage"
     requests.post(url, json={'chat_id': chat_id, 'message_id': message_id})
 
-# Webhook handler
-@app.route('/webhook', methods=['POST'])
+# Webhook endpoint
+@app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
+    # Handle GET for webhook verification
+    if request.method == 'GET':
+        return jsonify({"status": "ok", "message": "Webhook is active"}), 200
+    
+    # Handle POST for updates
     try:
         update = request.get_json()
         
@@ -313,7 +259,7 @@ def webhook():
                 movies = scraper.search_movies(text)
                 
                 if not movies:
-                    send_message(chat_id, f"❌ No movies found for *{text}*\n\nTry:\n• Different spelling\n• Include year (e.g., Animal 2023)\n• Shorter title")
+                    send_message(chat_id, f"❌ No movies found for *{text}*\n\nTry:\n• Different spelling\n• Include year (e.g., Animal 2023)")
                     return jsonify({"status": "ok"}), 200
                 
                 user_sessions[chat_id] = {'movies': movies}
@@ -331,32 +277,49 @@ def webhook():
         
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        return jsonify({"status": "error"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def index():
-    return "Bot is running!", 200
+    return jsonify({
+        "status": "running",
+        "bot": "HDHub4u Movie Bot",
+        "webhook": "/webhook"
+    }), 200
 
 def setup_webhook():
-    """Set webhook on startup"""
+    """Set webhook automatically using Render hostname"""
     hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if not hostname:
         logger.error("RENDER_EXTERNAL_HOSTNAME not set!")
-        return
+        return False
     
     webhook_url = f"https://{hostname}/webhook"
-    response = requests.post(f"{TELEGRAM_API}/setWebhook", json={'url': webhook_url})
     
-    if response.status_code == 200:
-        logger.info(f"✅ Webhook set to: {webhook_url}")
-    else:
-        logger.error(f"Failed to set webhook: {response.text}")
+    try:
+        # Remove old webhook first
+        requests.post(f"{TELEGRAM_API}/deleteWebhook")
+        
+        # Set new webhook
+        response = requests.post(
+            f"{TELEGRAM_API}/setWebhook",
+            json={'url': webhook_url, 'allowed_updates': ['message', 'callback_query']}
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Webhook set to: {webhook_url}")
+            return True
+        else:
+            logger.error(f"Failed to set webhook: {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Webhook setup error: {e}")
+        return False
 
 if __name__ == '__main__':
-    # Set webhook
+    # Set up webhook
     setup_webhook()
     
     # Start Flask server
     logger.info(f"🤖 Bot starting on port {PORT}...")
-    print(f"🤖 Bot running on port {PORT}")
     app.run(host='0.0.0.0', port=PORT)
