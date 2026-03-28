@@ -5,14 +5,10 @@ from urllib.parse import urljoin, quote
 from flask import Flask, request, jsonify
 import cloudscraper
 from bs4 import BeautifulSoup
-import asyncio
-import threading
+import requests
 
 # Simple logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -21,18 +17,15 @@ BASE_URL = "https://new5.hdhub4u.fo"
 DELETE_DELAY = 20
 PORT = int(os.getenv('PORT', 8080))
 
-# Check if token exists
 if not BOT_TOKEN:
     logger.error("BOT_TOKEN environment variable not set!")
     exit(1)
 
-# Import telegram
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from telegram.constants import ParseMode
-
 # Flask app
 app = Flask(__name__)
+
+# Telegram API URL
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 class HDHub4uScraper:
     def __init__(self):
@@ -112,129 +105,132 @@ class HDHub4uScraper:
 scraper = HDHub4uScraper()
 user_sessions = {}
 
-# Bot handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎬 **HDHub4u Movie Bot**\n\nSend me a **movie name** to search\nUse /help for commands\n\n⚠️ Links auto-delete in 20 seconds",
-        parse_mode=ParseMode.MARKDOWN
-    )
+# Helper function to send messages
+def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
+    url = f"{TELEGRAM_API}/sendMessage"
+    data = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': parse_mode,
+        'disable_web_page_preview': True
+    }
+    if reply_markup:
+        data['reply_markup'] = reply_markup
+    requests.post(url, json=data)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🔍 **Commands:**\n/start - Start bot\n/help - Help\n\nSimply type any movie name to search!",
-        parse_mode=ParseMode.MARKDOWN
-    )
+def edit_message(chat_id, message_id, text, reply_markup=None):
+    url = f"{TELEGRAM_API}/editMessageText"
+    data = {
+        'chat_id': chat_id,
+        'message_id': message_id,
+        'text': text,
+        'parse_mode': 'Markdown',
+        'disable_web_page_preview': True
+    }
+    if reply_markup:
+        data['reply_markup'] = reply_markup
+    requests.post(url, json=data)
 
-async def search_movies(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text.startswith('/'):
-        return
-    
-    query = update.message.text.strip()
-    
-    # Send typing action
-    await update.message.chat.send_action(action="typing")
-    
-    # Search
-    movies = scraper.search_movies(query)
-    
-    if not movies:
-        await update.message.reply_text(f"❌ No movies found for *{query}*", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    user_id = update.effective_user.id
-    user_sessions[user_id] = {'movies': movies}
-    
-    keyboard = []
-    for idx, movie in enumerate(movies[:10]):
-        qualities = ', '.join(movie['qualities'])
-        keyboard.append([InlineKeyboardButton(f"{movie['title'][:40]} ({movie['year']}) [{qualities}]", callback_data=f"movie_{idx}")])
-    
-    await update.message.reply_text(
-        f"✅ Found {len(movies)} movies\n\nSelect one:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+def answer_callback(callback_id):
+    url = f"{TELEGRAM_API}/answerCallbackQuery"
+    requests.post(url, json={'callback_query_id': callback_id})
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = update.effective_user.id
-    data = query.data
-    
-    if data.startswith('movie_'):
-        idx = int(data.split('_')[1])
-        movie = user_sessions.get(user_id, {}).get('movies', [])[idx]
-        
-        await query.edit_message_text(f"📥 Getting links for *{movie['title']}*...", parse_mode=ParseMode.MARKDOWN)
-        
-        links = scraper.get_download_links(movie['url'])
-        
-        if not links:
-            await query.edit_message_text("❌ No download links found", parse_mode=ParseMode.MARKDOWN)
-            return
-        
-        user_sessions[user_id]['links'] = links
-        user_sessions[user_id]['movie'] = movie
-        
-        keyboard = []
-        for i, link in enumerate(links):
-            keyboard.append([InlineKeyboardButton(f"📥 {link['quality']} - {link['server']}", callback_data=f"link_{i}")])
-        
-        await query.edit_message_text(
-            f"🎬 *{movie['title']}*\n\nChoose quality:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif data.startswith('link_'):
-        idx = int(data.split('_')[1])
-        movie = user_sessions.get(user_id, {}).get('movie', {})
-        link = user_sessions.get(user_id, {}).get('links', [])[idx]
-        
-        await query.message.reply_text(
-            f"🎬 *{movie.get('title', 'Movie')}*\n📀 *{link['quality']}* - {link['server']}\n\n🔗 `{link['url']}`\n\n⚠️ Link auto-deletes in 20 seconds",
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True
-        )
-        
-        await query.delete_message()
+def delete_message(chat_id, message_id):
+    url = f"{TELEGRAM_API}/deleteMessage"
+    requests.post(url, json={'chat_id': chat_id, 'message_id': message_id})
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Error: {context.error}")
-    if update and update.effective_message:
-        await update.effective_message.reply_text("⚠️ Error occurred. Try again.")
-
-# Create application
-application = Application.builder().token(BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
-application.add_handler(CallbackQueryHandler(button_callback))
-application.add_error_handler(error_handler)
-
-# Flask routes
+# Webhook handler
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Handle incoming webhook updates"""
     try:
-        # Get update data
-        update_data = request.get_json(force=True)
+        update = request.get_json()
         
-        # Process update in a thread with its own event loop
-        def process():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            update = Update.de_json(update_data, application.bot)
-            loop.run_until_complete(application.process_update(update))
-            loop.close()
+        if not update:
+            return jsonify({"status": "ok"}), 200
         
-        thread = threading.Thread(target=process)
-        thread.start()
+        # Handle callback queries (button clicks)
+        if 'callback_query' in update:
+            callback = update['callback_query']
+            callback_id = callback['id']
+            user_id = callback['from']['id']
+            data = callback['data']
+            message = callback['message']
+            chat_id = message['chat']['id']
+            message_id = message['message_id']
+            
+            answer_callback(callback_id)
+            
+            if data.startswith('movie_'):
+                idx = int(data.split('_')[1])
+                movie = user_sessions.get(user_id, {}).get('movies', [])[idx]
+                
+                edit_message(chat_id, message_id, f"📥 Getting links for *{movie['title']}*...")
+                
+                links = scraper.get_download_links(movie['url'])
+                
+                if not links:
+                    edit_message(chat_id, message_id, "❌ No download links found")
+                    return jsonify({"status": "ok"}), 200
+                
+                user_sessions[user_id]['links'] = links
+                user_sessions[user_id]['movie'] = movie
+                
+                keyboard = {
+                    'inline_keyboard': [
+                        [{'text': f"📥 {link['quality']} - {link['server']}", 'callback_data': f"link_{i}"}]
+                        for i, link in enumerate(links)
+                    ]
+                }
+                
+                edit_message(chat_id, message_id, f"🎬 *{movie['title']}*\n\nChoose quality:", keyboard)
+            
+            elif data.startswith('link_'):
+                idx = int(data.split('_')[1])
+                movie = user_sessions.get(user_id, {}).get('movie', {})
+                link = user_sessions.get(user_id, {}).get('links', [])[idx]
+                
+                send_message(
+                    chat_id,
+                    f"🎬 *{movie.get('title', 'Movie')}*\n📀 *{link['quality']}* - {link['server']}\n\n🔗 `{link['url']}`\n\n⚠️ Link auto-deletes in 20 seconds"
+                )
+                delete_message(chat_id, message_id)
+        
+        # Handle regular messages
+        elif 'message' in update:
+            message = update['message']
+            chat_id = message['chat']['id']
+            text = message.get('text', '')
+            
+            if text.startswith('/start'):
+                send_message(chat_id, "🎬 **HDHub4u Movie Bot**\n\nSend me a **movie name** to search\n\n⚠️ Links auto-delete in 20 seconds")
+            elif text.startswith('/help'):
+                send_message(chat_id, "🔍 **Commands:**\n/start - Start bot\n/help - Help\n\nSimply type any movie name to search!")
+            elif not text.startswith('/'):
+                # Search for movies
+                send_message(chat_id, f"🔍 Searching for *{text}*...")
+                
+                movies = scraper.search_movies(text)
+                
+                if not movies:
+                    send_message(chat_id, f"❌ No movies found for *{text}*")
+                    return jsonify({"status": "ok"}), 200
+                
+                user_sessions[chat_id] = {'movies': movies}
+                
+                keyboard = {
+                    'inline_keyboard': [
+                        [{'text': f"{movie['title'][:40]} ({movie['year']}) [{', '.join(movie['qualities'])}]", 'callback_data': f"movie_{idx}"}]
+                        for idx, movie in enumerate(movies[:10])
+                    ]
+                }
+                
+                send_message(chat_id, f"✅ Found {len(movies)} movies\n\nSelect one:", keyboard)
         
         return jsonify({"status": "ok"}), 200
+        
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "error"}), 500
 
 @app.route('/')
 def index():
@@ -242,36 +238,21 @@ def index():
 
 def setup_webhook():
     """Set webhook on startup"""
-    try:
-        # Get Render hostname
-        hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-        if not hostname:
-            logger.error("RENDER_EXTERNAL_HOSTNAME not set!")
-            return
-        
-        webhook_url = f"https://{hostname}/webhook"
-        
-        # Set webhook using a new event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.bot.set_webhook(webhook_url))
-        loop.close()
-        
+    hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+    if not hostname:
+        logger.error("RENDER_EXTERNAL_HOSTNAME not set!")
+        return
+    
+    webhook_url = f"https://{hostname}/webhook"
+    response = requests.post(f"{TELEGRAM_API}/setWebhook", json={'url': webhook_url})
+    
+    if response.status_code == 200:
         logger.info(f"✅ Webhook set to: {webhook_url}")
-        
-        # Get webhook info to verify
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        info = loop.run_until_complete(application.bot.get_webhook_info())
-        loop.close()
-        
-        logger.info(f"Webhook info: {info}")
-        
-    except Exception as e:
-        logger.error(f"Failed to set webhook: {e}")
+    else:
+        logger.error(f"Failed to set webhook: {response.text}")
 
 if __name__ == '__main__':
-    # Set up webhook
+    # Set webhook
     setup_webhook()
     
     # Start Flask server
