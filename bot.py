@@ -34,19 +34,51 @@ class HDHub4uScraper:
     def search_movies(self, query):
         try:
             search_url = f"{BASE_URL}/?s={quote(query)}"
+            logger.info(f"Searching URL: {search_url}")
+            
             response = self.scraper.get(search_url, timeout=20)
+            logger.info(f"Response status: {response.status_code}")
+            
+            # Save HTML for debugging (optional - remove in production)
+            with open('debug.html', 'w', encoding='utf-8') as f:
+                f.write(response.text)
+            logger.info("Saved HTML to debug.html")
+            
             soup = BeautifulSoup(response.text, 'html.parser')
             
+            # Try different selectors to find movies
             movies = []
-            containers = soup.find_all('article') or soup.find_all('div', class_=re.compile(r'item|post'))
+            
+            # Method 1: Look for article tags
+            containers = soup.find_all('article')
+            logger.info(f"Found {len(containers)} article tags")
+            
+            # Method 2: Look for divs with movie-related classes
+            if not containers:
+                containers = soup.find_all('div', class_=re.compile(r'movie|item|post|entry'))
+                logger.info(f"Found {len(containers)} divs with movie classes")
+            
+            # Method 3: Look for li items
+            if not containers:
+                containers = soup.find_all('li', class_=re.compile(r'movie|item'))
+                logger.info(f"Found {len(containers)} li items")
             
             for container in containers[:15]:
-                title_elem = container.find('h3') or container.find('h2')
+                # Try different ways to find title
+                title_elem = None
+                for tag in ['h3', 'h2', 'h1', 'a']:
+                    title_elem = container.find(tag, class_=re.compile(r'title|name|entry-title')) or container.find(tag)
+                    if title_elem:
+                        break
+                
+                # Try different ways to find link
                 link_elem = container.find('a', href=True)
                 
                 if title_elem and link_elem:
                     title = title_elem.text.strip()
                     link = link_elem.get('href')
+                    
+                    logger.info(f"Found movie: {title} - {link}")
                     
                     if link and not link.startswith('#'):
                         qualities = []
@@ -64,22 +96,31 @@ class HDHub4uScraper:
                             'url': link if link.startswith('http') else urljoin(BASE_URL, link),
                             'qualities': qualities if qualities else ['Various']
                         })
+            
+            logger.info(f"Total movies found: {len(movies)}")
             return movies
+            
         except Exception as e:
             logger.error(f"Search error: {e}")
             return []
     
     def get_download_links(self, movie_url):
         try:
+            logger.info(f"Getting links from: {movie_url}")
             response = self.scraper.get(movie_url, timeout=20)
             soup = BeautifulSoup(response.text, 'html.parser')
             
             links = []
-            for link in soup.find_all('a', href=True):
+            
+            # Find all download links
+            all_links = soup.find_all('a', href=True)
+            
+            for link in all_links:
                 href = link.get('href', '')
                 text = link.text.strip().lower()
                 
-                if any(k in href.lower() for k in ['download', '.mp4', '.mkv', 'hubcloud']):
+                # Check if it's a download link
+                if any(k in href.lower() for k in ['download', 'get', 'file', '.mp4', '.mkv', 'hubcloud', 'drive.google', 'mega']):
                     quality = 'Unknown'
                     if '4k' in href.lower() or '4k' in text:
                         quality = '4K'
@@ -90,14 +131,25 @@ class HDHub4uScraper:
                     elif '480p' in href.lower() or '480p' in text:
                         quality = '480p'
                     
-                    server = 'HubCloud' if 'hubcloud' in href.lower() else 'Direct'
+                    server = 'Direct'
+                    if 'hubcloud' in href.lower():
+                        server = 'HubCloud'
+                    elif 'drive.google' in href.lower():
+                        server = 'GDrive'
+                    elif 'mega' in href.lower():
+                        server = 'Mega'
                     
                     if href not in [l['url'] for l in links]:
                         links.append({'quality': quality, 'server': server, 'url': href})
+                        logger.info(f"Found link: {quality} - {server} - {href[:100]}")
             
-            quality_order = {'4K': 0, '1080p': 1, '720p': 2, '480p': 3}
+            # Sort by quality
+            quality_order = {'4K': 0, '1080p': 1, '720p': 2, '480p': 3, 'Unknown': 4}
             links.sort(key=lambda x: quality_order.get(x['quality'], 99))
+            
+            logger.info(f"Total links found: {len(links)}")
             return links
+            
         except Exception as e:
             logger.error(f"Error getting links: {e}")
             return []
@@ -116,7 +168,13 @@ def send_message(chat_id, text, reply_markup=None, parse_mode='Markdown'):
     }
     if reply_markup:
         data['reply_markup'] = reply_markup
-    requests.post(url, json=data)
+    try:
+        response = requests.post(url, json=data)
+        logger.info(f"Send message response: {response.status_code}")
+        return response.json()
+    except Exception as e:
+        logger.error(f"Send message error: {e}")
+        return None
 
 def edit_message(chat_id, message_id, text, reply_markup=None):
     url = f"{TELEGRAM_API}/editMessageText"
@@ -148,6 +206,8 @@ def webhook():
         if not update:
             return jsonify({"status": "ok"}), 200
         
+        logger.info(f"Received update: {update.get('message', {}).get('text', 'No text')}")
+        
         # Handle callback queries (button clicks)
         if 'callback_query' in update:
             callback = update['callback_query']
@@ -178,7 +238,7 @@ def webhook():
                 keyboard = {
                     'inline_keyboard': [
                         [{'text': f"📥 {link['quality']} - {link['server']}", 'callback_data': f"link_{i}"}]
-                        for i, link in enumerate(links)
+                        for i, link in enumerate(links[:10])  # Limit to 10
                     ]
                 }
                 
@@ -212,7 +272,7 @@ def webhook():
                 movies = scraper.search_movies(text)
                 
                 if not movies:
-                    send_message(chat_id, f"❌ No movies found for *{text}*")
+                    send_message(chat_id, f"❌ No movies found for *{text}*\n\nTry:\n• Different spelling\n• Include year (e.g., The Batman 2022)\n• Shorter title")
                     return jsonify({"status": "ok"}), 200
                 
                 user_sessions[chat_id] = {'movies': movies}
@@ -235,6 +295,16 @@ def webhook():
 @app.route('/')
 def index():
     return "Bot is running!", 200
+
+@app.route('/debug')
+def debug():
+    """Debug endpoint to see what's happening"""
+    return f"""
+    Bot Status: Running
+    Base URL: {BASE_URL}
+    Bot Token Set: {bool(BOT_TOKEN)}
+    Render Hostname: {os.getenv('RENDER_EXTERNAL_HOSTNAME', 'Not set')}
+    """, 200
 
 def setup_webhook():
     """Set webhook on startup"""
