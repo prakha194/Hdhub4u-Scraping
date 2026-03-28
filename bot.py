@@ -6,19 +6,19 @@ from urllib.parse import urljoin, quote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ParseMode
-from dotenv import load_dotenv
 import cloudscraper
 from bs4 import BeautifulSoup
 
-load_dotenv()
-
 # Configuration
-BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 BASE_URL = "https://new5.hdhub4u.fo"
 DELETE_DELAY = 20
 
 # Setup logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 class HDHub4uScraper:
@@ -203,16 +203,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("⚠️ Error occurred. Try again.")
 
 def main():
+    """Start bot"""
     app = Application.builder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_error_handler(error_handler)
     
-    print("🤖 Bot running...")
+    logger.info("🤖 Bot is starting...")
+    print("🤖 Bot is running...")
     app.run_polling()
 
 if __name__ == '__main__':
-    import asyncio
     main()
