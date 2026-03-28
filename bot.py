@@ -1,11 +1,16 @@
 import os
 import re
 import logging
+import time
 from urllib.parse import urljoin, quote
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import cloudscraper
-from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
 import requests
 
 # Simple logging
@@ -24,37 +29,70 @@ if not BOT_TOKEN:
 
 # Flask app with CORS
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
 # Telegram API URL
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 class HDHub4uScraper:
     def __init__(self):
-        self.scraper = cloudscraper.create_scraper()
+        self.driver = None
         
+    def get_driver(self):
+        """Create Chrome driver with proper options for Render"""
+        if self.driver is None:
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--window-size=1920,1080')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            try:
+                self.driver = webdriver.Chrome(options=chrome_options)
+                logger.info("Chrome driver created successfully")
+            except Exception as e:
+                logger.error(f"Failed to create Chrome driver: {e}")
+                raise
+        return self.driver
+    
     def search_movies(self, query):
+        driver = None
         try:
+            driver = self.get_driver()
             search_url = f"{BASE_URL}/search.html?q={quote(query)}"
             logger.info(f"Searching URL: {search_url}")
             
-            response = self.scraper.get(search_url, timeout=20)
-            logger.info(f"Response status: {response.status_code}")
+            # Load the page
+            driver.get(search_url)
             
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Wait for results to load (JavaScript content)
+            wait = WebDriverWait(driver, 10)
+            try:
+                # Wait for any movie links to appear
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "a")))
+                time.sleep(2)  # Extra wait for JavaScript
+            except TimeoutException:
+                logger.warning("Timeout waiting for page to load")
+            
+            # Get page source after JavaScript execution
+            html = driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
             
             movies = []
             
-            # Find all links with movie titles
+            # Find all links that look like movies
             all_links = soup.find_all('a', href=True)
             
             for link in all_links:
                 href = link.get('href', '')
                 title = link.text.strip()
                 
-                # Check if it's a movie (contains quality or year indicators)
-                if title and len(title) > 10:
-                    if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202']):
+                # Check if it's a movie title
+                if title and len(title) > 15:
+                    # Look for movie indicators
+                    if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202', 'Movie', 'Series']):
                         
                         # Extract qualities
                         qualities = []
@@ -75,12 +113,18 @@ class HDHub4uScraper:
                         else:
                             full_url = urljoin(BASE_URL, '/' + href)
                         
+                        # Skip home/trending links
+                        if 'home' in full_url.lower() or 'trending' in full_url.lower():
+                            continue
+                        
                         movies.append({
                             'title': title[:100],
                             'year': year,
                             'url': full_url,
                             'qualities': qualities if qualities else ['HD']
                         })
+                        
+                        logger.info(f"Found: {title[:60]}")
             
             # Remove duplicates
             seen = set()
@@ -90,22 +134,31 @@ class HDHub4uScraper:
                     seen.add(movie['url'])
                     unique_movies.append(movie)
             
-            logger.info(f"Found {len(unique_movies)} movies")
+            logger.info(f"Total movies found: {len(unique_movies)}")
             return unique_movies[:15]
             
         except Exception as e:
             logger.error(f"Search error: {e}")
             return []
+        finally:
+            # Don't close driver, reuse it
+            pass
     
     def get_download_links(self, movie_url):
+        driver = None
         try:
+            driver = self.get_driver()
             logger.info(f"Getting links from: {movie_url}")
-            response = self.scraper.get(movie_url, timeout=20)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            driver.get(movie_url)
+            time.sleep(3)  # Wait for page to load
+            
+            html = driver.page_source
+            soup = BeautifulSoup(html, 'html.parser')
             
             links = []
             
-            # Find all download links
+            # Find all links
             all_links = soup.find_all('a', href=True)
             
             for link in all_links:
@@ -113,7 +166,7 @@ class HDHub4uScraper:
                 text = link.text.strip().lower()
                 
                 # Check for download links
-                if any(k in href.lower() for k in ['download', '.mp4', '.mkv', 'hubcloud']):
+                if any(k in href.lower() for k in ['download', '.mp4', '.mkv', 'hubcloud', 'get', 'file']):
                     quality = 'Unknown'
                     if '4k' in href.lower() or '4k' in text:
                         quality = '4K'
@@ -124,22 +177,28 @@ class HDHub4uScraper:
                     elif '480p' in href.lower() or '480p' in text:
                         quality = '480p'
                     
-                    server = 'HubCloud' if 'hubcloud' in href.lower() else 'Direct'
+                    server = 'Direct'
+                    if 'hubcloud' in href.lower():
+                        server = 'HubCloud'
+                    elif 'drive' in href.lower():
+                        server = 'GDrive'
                     
                     if href not in [l['url'] for l in links]:
                         links.append({'quality': quality, 'server': server, 'url': href})
+                        logger.info(f"Found link: {quality} - {server}")
             
             # Sort by quality
             quality_order = {'4K': 0, '1080p': 1, '720p': 2, '480p': 3}
             links.sort(key=lambda x: quality_order.get(x['quality'], 99))
             
-            logger.info(f"Found {len(links)} download links")
+            logger.info(f"Total links found: {len(links)}")
             return links
             
         except Exception as e:
             logger.error(f"Error getting links: {e}")
             return []
 
+# Create scraper instance
 scraper = HDHub4uScraper()
 user_sessions = {}
 
@@ -184,18 +243,16 @@ def delete_message(chat_id, message_id):
 # Webhook endpoint
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
-    # Handle GET for webhook verification
     if request.method == 'GET':
         return jsonify({"status": "ok", "message": "Webhook is active"}), 200
     
-    # Handle POST for updates
     try:
         update = request.get_json()
         
         if not update:
             return jsonify({"status": "ok"}), 200
         
-        # Handle callback queries (button clicks)
+        # Handle callback queries
         if 'callback_query' in update:
             callback = update['callback_query']
             callback_id = callback['id']
@@ -253,7 +310,6 @@ def webhook():
             elif text.startswith('/help'):
                 send_message(chat_id, "🔍 **Commands:**\n/start - Start bot\n/help - Help\n\nSimply type any movie name to search!")
             elif not text.startswith('/'):
-                # Search for movies
                 send_message(chat_id, f"🔍 Searching for *{text}*...")
                 
                 movies = scraper.search_movies(text)
@@ -288,7 +344,7 @@ def index():
     }), 200
 
 def setup_webhook():
-    """Set webhook automatically using Render hostname"""
+    """Set webhook automatically"""
     hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if not hostname:
         logger.error("RENDER_EXTERNAL_HOSTNAME not set!")
@@ -297,10 +353,7 @@ def setup_webhook():
     webhook_url = f"https://{hostname}/webhook"
     
     try:
-        # Remove old webhook first
         requests.post(f"{TELEGRAM_API}/deleteWebhook")
-        
-        # Set new webhook
         response = requests.post(
             f"{TELEGRAM_API}/setWebhook",
             json={'url': webhook_url, 'allowed_updates': ['message', 'callback_query']}
@@ -317,9 +370,6 @@ def setup_webhook():
         return False
 
 if __name__ == '__main__':
-    # Set up webhook
     setup_webhook()
-    
-    # Start Flask server
     logger.info(f"🤖 Bot starting on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
