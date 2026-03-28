@@ -1,7 +1,4 @@
-selenium==4.15.2
-webdriver-manager==4.0.1
+requests==2.31.0
 beautifulsoup4==4.12.2
 flask==3.0.0
 flask-cors==4.0.0
-requests==2.31.0
-chromedriver-binary==120.0.6099.109
