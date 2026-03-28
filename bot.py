@@ -3,32 +3,38 @@ import re
 import logging
 import asyncio
 from urllib.parse import urljoin, quote
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from telegram.constants import ParseMode
 import cloudscraper
 from bs4 import BeautifulSoup
 
-# Configuration
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-BASE_URL = "https://new5.hdhub4u.fo"
-DELETE_DELAY = 20
-
-# Setup logging
+# Simple logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# Configuration
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+BASE_URL = "https://new5.hdhub4u.fo"
+DELETE_DELAY = 20
+
+# Check if token exists
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN environment variable not set!")
+    exit(1)
+
+# Import telegram after token check
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.constants import ParseMode
+
 class HDHub4uScraper:
     def __init__(self):
         self.scraper = cloudscraper.create_scraper()
-        self.base_url = BASE_URL
         
     def search_movies(self, query):
         try:
-            search_url = f"{self.base_url}/?s={quote(query)}"
+            search_url = f"{BASE_URL}/?s={quote(query)}"
             response = self.scraper.get(search_url, timeout=20)
             soup = BeautifulSoup(response.text, 'html.parser')
             
@@ -56,10 +62,9 @@ class HDHub4uScraper:
                         movies.append({
                             'title': title[:80],
                             'year': year,
-                            'url': link if link.startswith('http') else urljoin(self.base_url, link),
+                            'url': link if link.startswith('http') else urljoin(BASE_URL, link),
                             'qualities': qualities if qualities else ['Various']
                         })
-            
             return movies
         except Exception as e:
             logger.error(f"Search error: {e}")
@@ -71,24 +76,22 @@ class HDHub4uScraper:
             soup = BeautifulSoup(response.text, 'html.parser')
             
             links = []
-            all_links = soup.find_all('a', href=True)
-            
-            for link in all_links:
+            for link in soup.find_all('a', href=True):
                 href = link.get('href', '')
                 text = link.text.strip().lower()
                 
-                if any(k in href.lower() for k in ['download', '.mp4', '.mkv', 'hubcloud']) or \
-                   any(k in text for k in ['download', '4k', '1080p', '720p', '480p']):
-                    
+                if any(k in href.lower() for k in ['download', '.mp4', '.mkv', 'hubcloud']):
                     quality = 'Unknown'
-                    if '4k' in href.lower() or '4k' in text: quality = '4K'
-                    elif '1080p' in href.lower() or '1080p' in text: quality = '1080p'
-                    elif '720p' in href.lower() or '720p' in text: quality = '720p'
-                    elif '480p' in href.lower() or '480p' in text: quality = '480p'
+                    if '4k' in href.lower() or '4k' in text:
+                        quality = '4K'
+                    elif '1080p' in href.lower() or '1080p' in text:
+                        quality = '1080p'
+                    elif '720p' in href.lower() or '720p' in text:
+                        quality = '720p'
+                    elif '480p' in href.lower() or '480p' in text:
+                        quality = '480p'
                     
-                    server = 'Direct'
-                    if 'hubcloud' in href.lower(): server = 'HubCloud'
-                    elif 'drive' in href.lower(): server = 'GDrive'
+                    server = 'HubCloud' if 'hubcloud' in href.lower() else 'Direct'
                     
                     if href not in [l['url'] for l in links]:
                         links.append({'quality': quality, 'server': server, 'url': href})
