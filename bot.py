@@ -1,10 +1,11 @@
 import os
 import re
 import logging
-import asyncio
 from urllib.parse import urljoin, quote
+from flask import Flask, request
 import cloudscraper
 from bs4 import BeautifulSoup
+import asyncio
 
 # Simple logging
 logging.basicConfig(
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 BASE_URL = "https://new5.hdhub4u.fo"
 DELETE_DELAY = 20
+PORT = int(os.getenv('PORT', 8080))
 
 # Check if token exists
 if not BOT_TOKEN:
@@ -27,6 +29,9 @@ if not BOT_TOKEN:
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ParseMode
+
+# Flask app for webhook
+app_flask = Flask(__name__)
 
 class HDHub4uScraper:
     def __init__(self):
@@ -205,25 +210,48 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update and update.effective_message:
         await update.effective_message.reply_text("⚠️ Error occurred. Try again.")
 
-def main():
-    """Start bot"""
+# Initialize application
+application = Application.builder().token(BOT_TOKEN).build()
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("help", help_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
+application.add_handler(CallbackQueryHandler(button_callback))
+application.add_error_handler(error_handler)
+
+# Flask route for webhook
+@app_flask.route('/webhook', methods=['POST'])
+async def webhook():
+    """Handle incoming updates"""
     try:
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_movies))
-        application.add_handler(CallbackQueryHandler(button_callback))
-        application.add_error_handler(error_handler)
-        
-        logger.info("🤖 Bot is starting...")
-        print("🤖 Bot is running...")
-        
-        application.run_polling()
-        
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        await application.process_update(update)
+        return 'OK', 200
     except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        print(f"Error: {e}")
+        logger.error(f"Webhook error: {e}")
+        return 'Error', 500
+
+@app_flask.route('/')
+def index():
+    return "Bot is running!", 200
+
+def setup_webhook():
+    """Set up the webhook"""
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook"
+    try:
+        # Create new event loop for webhook setup
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(application.bot.set_webhook(webhook_url))
+        logger.info(f"Webhook set to {webhook_url}")
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
 
 if __name__ == '__main__':
-    main()
+    # Set up webhook
+    setup_webhook()
+    
+    # Start Flask server
+    logger.info("🤖 Bot is running with webhook mode...")
+    print("🤖 Bot is running...")
+    app_flask.run(host='0.0.0.0', port=PORT)
