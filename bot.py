@@ -1,25 +1,31 @@
 import os
 import re
 import logging
-from urllib.parse import urljoin, quote
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
-from bs4 import BeautifulSoup  # ← THIS WAS MISSING
+from firecrawl import Firecrawl
 
-# Simple logging
+# Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
 BOT_TOKEN = os.getenv('BOT_TOKEN')
+FIRECRAWL_API_KEY = os.getenv('FIRECRAWL_API_KEY')
 BASE_URL = "https://new5.hdhub4u.fo"
-DELETE_DELAY = 20
 PORT = int(os.getenv('PORT', 8080))
 
 if not BOT_TOKEN:
-    logger.error("BOT_TOKEN environment variable not set!")
+    logger.error("BOT_TOKEN not set!")
     exit(1)
+
+if not FIRECRAWL_API_KEY:
+    logger.error("FIRECRAWL_API_KEY not set!")
+    exit(1)
+
+# Initialize Firecrawl
+firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
 
 # Flask app
 app = Flask(__name__)
@@ -29,21 +35,34 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 class HDHub4uScraper:
     def search_movies(self, query):
+        """Search for movies using Firecrawl search"""
         try:
-            search_url = f"{BASE_URL}/search.html?q={quote(query)}"
+            search_url = f"{BASE_URL}/search.html?q={query.replace(' ', '+')}"
             logger.info(f"Searching: {search_url}")
             
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            response = requests.get(search_url, headers=headers, timeout=15)
-            logger.info(f"Status: {response.status_code}")
+            # Use Firecrawl to scrape the search page
+            result = firecrawl.scrape_url(
+                search_url,
+                params={
+                    'formats': ['markdown', 'html'],
+                    'waitFor': 3000,  # Wait for JS to load
+                    'timeout': 30000
+                }
+            )
             
-            soup = BeautifulSoup(response.text, 'html.parser')
+            if not result or not result.get('success'):
+                logger.error(f"Firecrawl error: {result}")
+                return []
+            
+            html = result.get('html', '')
+            if not html:
+                html = result.get('markdown', '')
+            
+            # Parse HTML to find movies
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
             
             movies = []
-            
-            # Find all links that could be movies
             all_links = soup.find_all('a', href=True)
             
             for link in all_links:
@@ -52,24 +71,22 @@ class HDHub4uScraper:
                 
                 # Look for movie titles with quality indicators
                 if title and len(title) > 20:
-                    if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC']):
-                        
-                        # Extract quality
+                    if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202']):
                         qualities = []
                         if '4K' in title: qualities.append('4K')
                         if '1080p' in title: qualities.append('1080p')
                         if '720p' in title: qualities.append('720p')
                         if '480p' in title: qualities.append('480p')
                         
-                        # Extract year
                         year_match = re.search(r'(19|20)\d{2}', title)
                         year = year_match.group() if year_match else 'N/A'
                         
-                        # Build URL
                         if href.startswith('/'):
-                            full_url = urljoin(BASE_URL, href)
-                        else:
+                            full_url = f"{BASE_URL}{href}"
+                        elif href.startswith('http'):
                             full_url = href
+                        else:
+                            full_url = f"{BASE_URL}/{href}"
                         
                         movies.append({
                             'title': title[:80],
@@ -77,7 +94,6 @@ class HDHub4uScraper:
                             'url': full_url,
                             'qualities': qualities if qualities else ['HD']
                         })
-                        
                         logger.info(f"Found: {title[:50]}")
             
             # Remove duplicates
@@ -88,7 +104,7 @@ class HDHub4uScraper:
                     seen.add(m['url'])
                     unique.append(m)
             
-            logger.info(f"Total: {len(unique)} movies")
+            logger.info(f"Total movies found: {len(unique)}")
             return unique[:10]
             
         except Exception as e:
@@ -96,29 +112,58 @@ class HDHub4uScraper:
             return []
     
     def get_download_links(self, movie_url):
+        """Get download links from movie page using Firecrawl"""
         try:
-            logger.info(f"Getting links from: {movie_url}")
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            response = requests.get(movie_url, headers=headers, timeout=15)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            logger.info(f"Getting links: {movie_url}")
+            
+            # Use Firecrawl to scrape the movie page
+            result = firecrawl.scrape_url(
+                movie_url,
+                params={
+                    'formats': ['markdown', 'html'],
+                    'waitFor': 3000,
+                    'timeout': 30000
+                }
+            )
+            
+            if not result or not result.get('success'):
+                logger.error(f"Firecrawl error: {result}")
+                return []
+            
+            html = result.get('html', '')
+            if not html:
+                html = result.get('markdown', '')
+            
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
             
             links = []
-            
             for link in soup.find_all('a', href=True):
                 href = link.get('href', '')
+                text = link.text.strip().lower()
                 
-                if any(k in href.lower() for k in ['download', '.mp4', '.mkv', 'hubcloud']):
+                if any(k in href.lower() for k in ['download', '.mp4', '.mkv', 'hubcloud', 'get']):
                     quality = 'HD'
-                    if '4k' in href.lower(): quality = '4K'
-                    elif '1080p' in href.lower(): quality = '1080p'
-                    elif '720p' in href.lower(): quality = '720p'
-                    elif '480p' in href.lower(): quality = '480p'
+                    if '4k' in href.lower() or '4k' in text:
+                        quality = '4K'
+                    elif '1080p' in href.lower() or '1080p' in text:
+                        quality = '1080p'
+                    elif '720p' in href.lower() or '720p' in text:
+                        quality = '720p'
+                    elif '480p' in href.lower() or '480p' in text:
+                        quality = '480p'
                     
                     server = 'Direct'
-                    if 'hubcloud' in href.lower(): server = 'HubCloud'
+                    if 'hubcloud' in href.lower():
+                        server = 'HubCloud'
+                    elif 'drive.google' in href.lower():
+                        server = 'GDrive'
+                    elif 'mega' in href.lower():
+                        server = 'Mega'
                     
                     if href not in [l['url'] for l in links]:
                         links.append({'quality': quality, 'server': server, 'url': href})
+                        logger.info(f"Found link: {quality} - {server}")
             
             return links[:10]
         except Exception as e:
@@ -129,7 +174,6 @@ scraper = HDHub4uScraper()
 user_sessions = {}
 
 def send_message(chat_id, text, reply_markup=None):
-    url = f"{TELEGRAM_API}/sendMessage"
     data = {
         'chat_id': chat_id,
         'text': text,
@@ -138,20 +182,18 @@ def send_message(chat_id, text, reply_markup=None):
     }
     if reply_markup:
         data['reply_markup'] = reply_markup
-    requests.post(url, json=data)
+    requests.post(f"{TELEGRAM_API}/sendMessage", json=data)
 
 def edit_message(chat_id, message_id, text, reply_markup=None):
-    url = f"{TELEGRAM_API}/editMessageText"
     data = {
         'chat_id': chat_id,
         'message_id': message_id,
         'text': text,
-        'parse_mode': 'Markdown',
-        'disable_web_page_preview': True
+        'parse_mode': 'Markdown'
     }
     if reply_markup:
         data['reply_markup'] = reply_markup
-    requests.post(url, json=data)
+    requests.post(f"{TELEGRAM_API}/editMessageText", json=data)
 
 def answer_callback(callback_id):
     requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={'callback_query_id': callback_id})
@@ -163,7 +205,6 @@ def webhook():
         if not update:
             return jsonify({"status": "ok"}), 200
         
-        # Handle button clicks
         if 'callback_query' in update:
             callback = update['callback_query']
             user_id = callback['from']['id']
@@ -198,20 +239,19 @@ def webhook():
                 idx = int(data.split('_')[1])
                 movie = user_sessions.get(user_id, {}).get('movie', {})
                 link = user_sessions.get(user_id, {}).get('links', [])[idx]
-                
                 send_message(chat_id, f"🎬 *{movie.get('title', 'Movie')}*\n📀 *{link['quality']}*\n\n🔗 `{link['url']}`")
         
-        # Handle text messages
         elif 'message' in update:
             msg = update['message']
             chat_id = msg['chat']['id']
             text = msg.get('text', '')
             
             if text == '/start':
-                send_message(chat_id, "🎬 Send me a **movie name** to search!")
+                send_message(chat_id, "🎬 **HDHub4u Movie Bot**\n\nSend me a **movie name** to search!\n\nPowered by Firecrawl API")
+            elif text == '/help':
+                send_message(chat_id, "🔍 **Commands:**\n/start - Start bot\n/help - Help\n\nSimply type any movie name to search!")
             elif text and not text.startswith('/'):
                 send_message(chat_id, f"🔍 Searching for *{text}*...")
-                
                 movies = scraper.search_movies(text)
                 
                 if not movies:
@@ -219,7 +259,6 @@ def webhook():
                     return jsonify({"status": "ok"}), 200
                 
                 user_sessions[chat_id] = {'movies': movies}
-                
                 keyboard = {
                     'inline_keyboard': [[{'text': f"{m['title'][:45]} ({m['year']})", 'callback_data': f"movie_{i}"}] for i, m in enumerate(movies[:10])]
                 }
@@ -232,14 +271,14 @@ def webhook():
 
 @app.route('/')
 def index():
-    return "Bot running!", 200
+    return "Bot running with Firecrawl!", 200
 
 def setup_webhook():
     hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if hostname:
         webhook_url = f"https://{hostname}/webhook"
         requests.post(f"{TELEGRAM_API}/setWebhook", json={'url': webhook_url})
-        logger.info(f"Webhook set to: {webhook_url}")
+        logger.info(f"Webhook set: {webhook_url}")
 
 if __name__ == '__main__':
     setup_webhook()
