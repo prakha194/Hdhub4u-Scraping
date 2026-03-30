@@ -4,7 +4,8 @@ import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
-from firecrawl import Firecrawl
+from bs4 import BeautifulSoup
+from firecrawl import FirecrawlApp  # Fixed import
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -25,7 +26,7 @@ if not FIRECRAWL_API_KEY:
     exit(1)
 
 # Initialize Firecrawl
-firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
+firecrawl = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
 
 # Flask app
 app = Flask(__name__)
@@ -35,31 +36,30 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 class HDHub4uScraper:
     def search_movies(self, query):
-        """Search for movies using Firecrawl search"""
+        """Search for movies using Firecrawl"""
         try:
             search_url = f"{BASE_URL}/search.html?q={query.replace(' ', '+')}"
             logger.info(f"Searching: {search_url}")
             
-            # Use Firecrawl to scrape the search page
+            # Use Firecrawl to scrape
             result = firecrawl.scrape_url(
                 search_url,
                 params={
-                    'formats': ['markdown', 'html'],
-                    'waitFor': 3000,  # Wait for JS to load
+                    'formats': ['html'],
+                    'waitFor': 3000,
                     'timeout': 30000
                 }
             )
             
-            if not result or not result.get('success'):
-                logger.error(f"Firecrawl error: {result}")
+            if not result:
+                logger.error("Firecrawl returned no result")
                 return []
             
             html = result.get('html', '')
             if not html:
-                html = result.get('markdown', '')
+                logger.error("No HTML in response")
+                return []
             
-            # Parse HTML to find movies
-            from bs4 import BeautifulSoup
             soup = BeautifulSoup(html, 'html.parser')
             
             movies = []
@@ -69,7 +69,6 @@ class HDHub4uScraper:
                 href = link.get('href', '')
                 title = link.text.strip()
                 
-                # Look for movie titles with quality indicators
                 if title and len(title) > 20:
                     if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202']):
                         qualities = []
@@ -112,29 +111,26 @@ class HDHub4uScraper:
             return []
     
     def get_download_links(self, movie_url):
-        """Get download links from movie page using Firecrawl"""
+        """Get download links from movie page"""
         try:
             logger.info(f"Getting links: {movie_url}")
             
-            # Use Firecrawl to scrape the movie page
             result = firecrawl.scrape_url(
                 movie_url,
                 params={
-                    'formats': ['markdown', 'html'],
+                    'formats': ['html'],
                     'waitFor': 3000,
                     'timeout': 30000
                 }
             )
             
-            if not result or not result.get('success'):
-                logger.error(f"Firecrawl error: {result}")
+            if not result:
                 return []
             
             html = result.get('html', '')
             if not html:
-                html = result.get('markdown', '')
+                return []
             
-            from bs4 import BeautifulSoup
             soup = BeautifulSoup(html, 'html.parser')
             
             links = []
@@ -182,7 +178,10 @@ def send_message(chat_id, text, reply_markup=None):
     }
     if reply_markup:
         data['reply_markup'] = reply_markup
-    requests.post(f"{TELEGRAM_API}/sendMessage", json=data)
+    try:
+        requests.post(f"{TELEGRAM_API}/sendMessage", json=data, timeout=10)
+    except Exception as e:
+        logger.error(f"Send error: {e}")
 
 def edit_message(chat_id, message_id, text, reply_markup=None):
     data = {
@@ -193,10 +192,16 @@ def edit_message(chat_id, message_id, text, reply_markup=None):
     }
     if reply_markup:
         data['reply_markup'] = reply_markup
-    requests.post(f"{TELEGRAM_API}/editMessageText", json=data)
+    try:
+        requests.post(f"{TELEGRAM_API}/editMessageText", json=data, timeout=10)
+    except Exception as e:
+        logger.error(f"Edit error: {e}")
 
 def answer_callback(callback_id):
-    requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={'callback_query_id': callback_id})
+    try:
+        requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={'callback_query_id': callback_id}, timeout=5)
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -266,7 +271,7 @@ def webhook():
         
         return jsonify({"status": "ok"}), 200
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Webhook error: {e}")
         return jsonify({"status": "error"}), 500
 
 @app.route('/')
@@ -277,9 +282,17 @@ def setup_webhook():
     hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if hostname:
         webhook_url = f"https://{hostname}/webhook"
-        requests.post(f"{TELEGRAM_API}/setWebhook", json={'url': webhook_url})
-        logger.info(f"Webhook set: {webhook_url}")
+        try:
+            requests.post(f"{TELEGRAM_API}/deleteWebhook")
+            response = requests.post(f"{TELEGRAM_API}/setWebhook", json={'url': webhook_url})
+            if response.status_code == 200:
+                logger.info(f"✅ Webhook set: {webhook_url}")
+            else:
+                logger.error(f"Webhook failed: {response.text}")
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
 
 if __name__ == '__main__':
     setup_webhook()
+    logger.info(f"🤖 Bot starting on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
