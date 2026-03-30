@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
-from firecrawl import FirecrawlApp
+from firecrawl import Firecrawl  # Correct import
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -25,8 +25,8 @@ if not FIRECRAWL_API_KEY:
     logger.error("FIRECRAWL_API_KEY not set!")
     exit(1)
 
-# Initialize Firecrawl
-firecrawl = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+# Initialize Firecrawl with correct API
+app_firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
 
 # Flask app
 app = Flask(__name__)
@@ -36,29 +36,30 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 class HDHub4uScraper:
     def search_movies(self, query):
-        """Search for movies using Firecrawl"""
+        """Search for movies using Firecrawl scrape"""
         try:
             search_url = f"{BASE_URL}/search.html?q={query.replace(' ', '+')}"
             logger.info(f"Searching: {search_url}")
             
-            # Updated Firecrawl API v2 format
-            result = firecrawl.scrape_url(
+            # Use correct Firecrawl scrape method with parameters
+            result = app_firecrawl.scrape(
                 search_url,
-                {
-                    'formats': ['html'],
-                    'waitFor': 3000,
-                    'timeout': 30000
-                }
+                only_main_content=False,
+                formats=["html"]
             )
             
-            if not result:
-                logger.error("Firecrawl returned no result")
-                return []
+            logger.info(f"Firecrawl result type: {type(result)}")
             
-            # Get HTML from response
-            html = result.get('html', '')
-            if not html and 'data' in result:
-                html = result['data'].get('html', '')
+            # Extract HTML from result
+            html = None
+            if isinstance(result, dict):
+                html = result.get('html', '')
+                if not html and 'data' in result:
+                    html = result['data'].get('html', '')
+                if not html and 'content' in result:
+                    html = result['content']
+            elif isinstance(result, str):
+                html = result
             
             if not html:
                 logger.error("No HTML in response")
@@ -119,23 +120,20 @@ class HDHub4uScraper:
         try:
             logger.info(f"Getting links: {movie_url}")
             
-            # Updated Firecrawl API v2 format
-            result = firecrawl.scrape_url(
+            result = app_firecrawl.scrape(
                 movie_url,
-                {
-                    'formats': ['html'],
-                    'waitFor': 3000,
-                    'timeout': 30000
-                }
+                only_main_content=False,
+                formats=["html"]
             )
             
-            if not result:
-                return []
-            
-            # Get HTML from response
-            html = result.get('html', '')
-            if not html and 'data' in result:
-                html = result['data'].get('html', '')
+            # Extract HTML
+            html = None
+            if isinstance(result, dict):
+                html = result.get('html', '')
+                if not html and 'data' in result:
+                    html = result['data'].get('html', '')
+            elif isinstance(result, str):
+                html = result
             
             if not html:
                 return []
