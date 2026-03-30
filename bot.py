@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
-from firecrawl import FirecrawlApp  # Fixed import
+from firecrawl import FirecrawlApp
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -41,10 +41,10 @@ class HDHub4uScraper:
             search_url = f"{BASE_URL}/search.html?q={query.replace(' ', '+')}"
             logger.info(f"Searching: {search_url}")
             
-            # Use Firecrawl to scrape
+            # Updated Firecrawl API v2 format
             result = firecrawl.scrape_url(
                 search_url,
-                params={
+                {
                     'formats': ['html'],
                     'waitFor': 3000,
                     'timeout': 30000
@@ -55,7 +55,11 @@ class HDHub4uScraper:
                 logger.error("Firecrawl returned no result")
                 return []
             
+            # Get HTML from response
             html = result.get('html', '')
+            if not html and 'data' in result:
+                html = result['data'].get('html', '')
+            
             if not html:
                 logger.error("No HTML in response")
                 return []
@@ -115,9 +119,10 @@ class HDHub4uScraper:
         try:
             logger.info(f"Getting links: {movie_url}")
             
+            # Updated Firecrawl API v2 format
             result = firecrawl.scrape_url(
                 movie_url,
-                params={
+                {
                     'formats': ['html'],
                     'waitFor': 3000,
                     'timeout': 30000
@@ -127,7 +132,11 @@ class HDHub4uScraper:
             if not result:
                 return []
             
+            # Get HTML from response
             html = result.get('html', '')
+            if not html and 'data' in result:
+                html = result['data'].get('html', '')
+            
             if not html:
                 return []
             
