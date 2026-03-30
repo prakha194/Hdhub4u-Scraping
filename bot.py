@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
-from firecrawl import Firecrawl  # Correct import
+from firecrawl import Firecrawl
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -25,7 +25,7 @@ if not FIRECRAWL_API_KEY:
     logger.error("FIRECRAWL_API_KEY not set!")
     exit(1)
 
-# Initialize Firecrawl with correct API
+# Initialize Firecrawl with correct import
 app_firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
 
 # Flask app
@@ -36,19 +36,19 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 class HDHub4uScraper:
     def search_movies(self, query):
-        """Search for movies using Firecrawl scrape"""
+        """Search for movies using Firecrawl"""
         try:
             search_url = f"{BASE_URL}/search.html?q={query.replace(' ', '+')}"
             logger.info(f"Searching: {search_url}")
             
-            # Use correct Firecrawl scrape method with parameters
+            # CORRECT: Use scrape() method with named parameters
             result = app_firecrawl.scrape(
-                search_url,
+                url=search_url,
                 only_main_content=False,
                 formats=["html"]
             )
             
-            logger.info(f"Firecrawl result type: {type(result)}")
+            logger.info(f"Firecrawl result: {type(result)}")
             
             # Extract HTML from result
             html = None
@@ -65,6 +65,11 @@ class HDHub4uScraper:
                 logger.error("No HTML in response")
                 return []
             
+            # Save HTML for debugging
+            with open('debug.html', 'w', encoding='utf-8') as f:
+                f.write(html[:5000])
+            logger.info("Saved HTML for debugging")
+            
             soup = BeautifulSoup(html, 'html.parser')
             
             movies = []
@@ -74,6 +79,7 @@ class HDHub4uScraper:
                 href = link.get('href', '')
                 title = link.text.strip()
                 
+                # Look for movie titles with quality indicators
                 if title and len(title) > 20:
                     if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202']):
                         qualities = []
@@ -120,8 +126,9 @@ class HDHub4uScraper:
         try:
             logger.info(f"Getting links: {movie_url}")
             
+            # CORRECT: Use scrape() method
             result = app_firecrawl.scrape(
-                movie_url,
+                url=movie_url,
                 only_main_content=False,
                 formats=["html"]
             )
