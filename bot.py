@@ -5,7 +5,15 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 from bs4 import BeautifulSoup
-from firecrawl import Firecrawl
+
+# Correct Firecrawl import
+try:
+    from firecrawl import FirecrawlApp  # Try this first
+except ImportError:
+    try:
+        from firecrawl import Firecrawl  # Alternative import
+    except ImportError:
+        from firecrawl import Client as FirecrawlApp  # Another alternative
 
 # Logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -25,8 +33,18 @@ if not FIRECRAWL_API_KEY:
     logger.error("FIRECRAWL_API_KEY not set!")
     exit(1)
 
-# Initialize Firecrawl with correct import
-app_firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
+# Initialize Firecrawl
+try:
+    app_firecrawl = FirecrawlApp(api_key=FIRECRAWL_API_KEY)
+    logger.info("Firecrawl initialized with FirecrawlApp")
+except:
+    try:
+        app_firecrawl = Firecrawl(api_key=FIRECRAWL_API_KEY)
+        logger.info("Firecrawl initialized with Firecrawl")
+    except:
+        from firecrawl import Client
+        app_firecrawl = Client(api_key=FIRECRAWL_API_KEY)
+        logger.info("Firecrawl initialized with Client")
 
 # Flask app
 app = Flask(__name__)
@@ -41,14 +59,22 @@ class HDHub4uScraper:
             search_url = f"{BASE_URL}/search.html?q={query.replace(' ', '+')}"
             logger.info(f"Searching: {search_url}")
             
-            # CORRECT: Use scrape() method with named parameters
-            result = app_firecrawl.scrape(
-                url=search_url,
-                only_main_content=False,
-                formats=["html"]
-            )
-            
-            logger.info(f"Firecrawl result: {type(result)}")
+            # Try different method signatures
+            try:
+                # Method 1: Using scrape method
+                result = app_firecrawl.scrape(
+                    url=search_url,
+                    formats=["html"]
+                )
+            except:
+                try:
+                    # Method 2: Using scrape_url method
+                    result = app_firecrawl.scrape_url(search_url)
+                except:
+                    # Method 3: Direct HTTP request as fallback
+                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    response = requests.get(search_url, headers=headers, timeout=15)
+                    result = {'html': response.text}
             
             # Extract HTML from result
             html = None
@@ -58,17 +84,14 @@ class HDHub4uScraper:
                     html = result['data'].get('html', '')
                 if not html and 'content' in result:
                     html = result['content']
+                if not html and 'markdown' in result:
+                    html = result['markdown']
             elif isinstance(result, str):
                 html = result
             
             if not html:
                 logger.error("No HTML in response")
                 return []
-            
-            # Save HTML for debugging
-            with open('debug.html', 'w', encoding='utf-8') as f:
-                f.write(html[:5000])
-            logger.info("Saved HTML for debugging")
             
             soup = BeautifulSoup(html, 'html.parser')
             
@@ -79,7 +102,6 @@ class HDHub4uScraper:
                 href = link.get('href', '')
                 title = link.text.strip()
                 
-                # Look for movie titles with quality indicators
                 if title and len(title) > 20:
                     if any(key in title for key in ['4K', '1080p', '720p', '480p', 'BluRay', 'WEB-DL', 'HDTC', '202']):
                         qualities = []
@@ -126,12 +148,16 @@ class HDHub4uScraper:
         try:
             logger.info(f"Getting links: {movie_url}")
             
-            # CORRECT: Use scrape() method
-            result = app_firecrawl.scrape(
-                url=movie_url,
-                only_main_content=False,
-                formats=["html"]
-            )
+            # Try different method signatures
+            try:
+                result = app_firecrawl.scrape(url=movie_url, formats=["html"])
+            except:
+                try:
+                    result = app_firecrawl.scrape_url(movie_url)
+                except:
+                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    response = requests.get(movie_url, headers=headers, timeout=15)
+                    result = {'html': response.text}
             
             # Extract HTML
             html = None
